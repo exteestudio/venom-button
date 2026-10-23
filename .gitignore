@@ -1,0 +1,4 @@
+.DS_Store
+*.mov
+*Screen Recording*
+node_modules/
