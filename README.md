@@ -10,6 +10,8 @@ A symbiote button for the web. A matte, jet-black slab of goo sits on a white st
 
 One HTML file, raw WebGL2, no dependencies, no build step.
 
+> **Made entirely by talking to Claude Code in plain English.** The full breakdown, every round of feedback, every measurement, and a prompting playbook live in **[docs/](docs/README.md)**.
+
 ## Run it
 
 Open `index.html` in a recent Chrome, Edge, Safari or Firefox. That's it.
