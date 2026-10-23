@@ -2,6 +2,8 @@
 
 A symbiote button for the web. A matte, jet-black slab of goo sits on a white studio floor. Bring the cursor close and the surface reaches for it: thin, stretchy tendrils lunge out, web together like pulled mozzarella, coil around the cursor and hold on. Pull away and they neck, snap, and recoil back into the body like melted rubber.
 
+**[Live demo →](https://exteestudio.github.io/venom-button/)** · [2× for big screens](https://exteestudio.github.io/venom-button/?scale=2)
+
 ![Venom Button demo](media/demo.gif)
 
 [Watch the full-quality clip (MP4)](media/demo.mp4)
