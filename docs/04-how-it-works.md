@@ -44,7 +44,7 @@ The bigger `k`, the gooier the join. Early versions used large values and looked
 
 ## 2 · Looking straight down
 
-The camera looks straight down. For each pixel, pass 1 drops a ray from above and **marches** it down, stepping by the distance the SDF reports, until it touches a surface. It records the height and the surface direction (normal). Because rays are vertical, a lot can be skipped: each pixel first works out which tendril segments could possibly reach it, and only tests those.
+The camera looks straight down. For each pixel, pass 1 drops a ray from above and **marches** it down, stepping by the distance the SDF reports, until it touches a surface. It records the height and the surface direction (normal). Because rays are vertical, a lot can be skipped: each pixel first works out which tendril segments could possibly reach it, and only tests those. Where nothing but the slab is underneath, its height is solved directly instead of marched, and only the screen region around the button, tendrils and cursor (plus their shadows) is traced at all; the rest of the floor is kept from earlier frames.
 
 ## 3 · Light like a photo studio
 
