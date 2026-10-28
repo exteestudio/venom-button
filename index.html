@@ -334,7 +334,7 @@ vec2 button2D(vec2 p) {
   disp += lift * body;
   if (uEmboss > 0.0) {
     vec2 lu = (p - uLabelBox.xy) / (2.0 * uLabelBox.zw) + 0.5;
-    if (lu.x > 0.0 && lu.y > 0.0 && lu.x < 1.0 && lu.y < 1.0) disp += uEmboss * textureLod(uLabel, lu, 2.0).a;
+    if (lu.x > 0.0 && lu.y > 0.0 && lu.x < 1.0 && lu.y < 1.0) disp += uEmboss * smoothstep(-8.0, 8.0, textureLod(uLabel, lu, 0.0).r);
   }
   return vec2(d, disp);
 }
@@ -345,6 +345,13 @@ float sdButton(vec2 bd, float z) {
   float re = min(uBtnZ2.y, hh);
   vec2 w = vec2(bd.x + re, abs(z - zc) - hh + re);
   return min(max(w.x, w.y), 0.0) + length(max(w, 0.0)) - re - bd.y;
+}
+// where a vertical ray meets that slab's top (the zero set of sdButton from above), or -1 when it misses
+float buttonTop(vec2 bd) {
+  float hh = 0.5 * (uBtnZ.x + uBtnZ.y), zc = 0.5 * (uBtnZ.x - uBtnZ.y) + uBtnZ2.x;
+  float re = min(uBtnZ2.y, hh), r = re + bd.y, wx = bd.x + re;
+  if (wx >= r) return -1.0;
+  return zc + hh - re + (wx > 0.0 ? sqrt(r * r - wx * wx) : r);
 }
 float sdSeg(vec3 p, vec4 a, vec4 b) {
   vec3 pa = p - a.xyz, ba = b.xyz - a.xyz;
@@ -409,8 +416,17 @@ float map(vec3 p, vec2 bd, float h2, out float dB, out float dS, out float dH) {
   return smin(dg, dH, 1.2);  // goo clings to the icon with a tiny meniscus
 }
 
+vec4 missG(float minD) {
+#ifdef ENC8
+  return vec4(clamp(minD / 4.0, 0.0, 1.0), 0.0, 0.0, 0.0);
+#else
+  return vec4(minD, 0.0, 0.0, 0.0);
+#endif
+}
+
 void main() {
   vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) / uDpr;
+  bool near = false; // anything besides the button within reach of this pixel's ray
 
   // per-pixel candidate segments: a vertical ray never gets closer than the 2D distance
   for (int s = 0; s < MAXS; s++) {
@@ -426,11 +442,13 @@ void main() {
       if (length(pa - ba * h) - max(a.w, b.w) < uK.y + 2.0) m |= (1u << uint(j));
     }
     gMask[s] = m;
+    near = near || m != 0u;
   }
   for (int b = 0; b < MAXB; b++) {
     gBlob[b] = false;
     if (b >= uNB) continue;
     gBlob[b] = length(p - uBlob[b].xy) - uBlob[b].w < uK.y + uK.z + 2.0;
+    near = near || gBlob[b];
   }
   for (int b = 0; b < MAXBR; b++) {
     gBr[b] = false;
@@ -438,6 +456,7 @@ void main() {
     vec2 lo = min(min(uBr[b * 3].xy, uBr[b * 3 + 1].xy), uBr[b * 3 + 2].xy) - uK.x - 3.0;
     vec2 hi = max(max(uBr[b * 3].xy, uBr[b * 3 + 1].xy), uBr[b * 3 + 2].xy) + uK.x + 3.0;
     gBr[b] = all(greaterThan(p, lo)) && all(lessThan(p, hi));
+    near = near || gBr[b];
   }
   for (int c = 0; c < MAXC; c++) {
     gCMask[c] = 0u;
@@ -452,6 +471,7 @@ void main() {
       if (length(pa - ba * h) - max(a.w, b.w) < uK.y + 2.0) m |= (1u << uint(j));
     }
     gCMask[c] = m;
+    near = near || m != 0u;
   }
   // icon centre (12,12) sits at offset (4,9) from the hotspot
   vec2 hc = uHand.xy + mat2(uHand2.x, uHand2.y, -uHand2.y, uHand2.x) * (vec2(4.0, 9.0) * uHand.z);
@@ -459,23 +479,26 @@ void main() {
 
   vec2 bd = button2D(p);
   float h2 = gHand ? hand2D(p) : 1e5;
-  float z = uZTop, minD = 1e5, dB, dS, dH;
+  float z = uZTop, minD = 1e5, dB = 0.0, dS = 1e5, dH = 1e5;
   bool hit = false;
-  for (int i = 0; i < 64; i++) {
-    float d = map(vec3(p, z), bd, h2, dB, dS, dH);
-    minD = min(minD, d);
-    if (d < 0.02) { hit = true; break; }
-    z -= max(d * 0.8, 0.01);
-    if (z < 0.0) break;
+  if (!near && !gHand) {
+    // only the slab can be under this pixel: solve its top directly. Marching would take dozens of tiny
+    // steps on the rim, where the ray grazes the bevel, and stall its whole GPU warp
+    z = buttonTop(bd);
+    if (z < 0.0) { outG = missG(bd.x - bd.y); return; }
+    hit = true;
+  } else {
+    // 32 steps: the few rays that need more are grazing a silhouette, where the edge coverage from minD
+    // already gives the right pixel, and each one would hold up its whole warp
+    for (int i = 0; i < 32; i++) {
+      float d = map(vec3(p, z), bd, h2, dB, dS, dH);
+      minD = min(minD, d);
+      if (d < 0.02) { hit = true; break; }
+      z -= max(d * 0.8, 0.01);
+      if (z < 0.0) break;
+    }
   }
-  if (!hit) {
-#ifdef ENC8
-    outG = vec4(clamp(minD / 4.0, 0.0, 1.0), 0.0, 0.0, 0.0);
-#else
-    outG = vec4(minD, 0.0, 0.0, 0.0);
-#endif
-    return;
-  }
+  if (!hit) { outG = missG(minD); return; }
 
   vec3 pos = vec3(p, z);
   const vec2 k = vec2(1.0, -1.0);
@@ -506,7 +529,7 @@ uniform float uDpr;
 uniform float uTime;
 uniform vec4 uLabelBox;
 uniform float uLabelAmt;
-uniform float uLabelLod;
+uniform float uLabelPx;  // device px per label texel
 uniform float uIri;
 uniform float uZMax;
 uniform float uLift;
@@ -521,6 +544,7 @@ uniform vec4 uHand2;
 out vec4 outC;
 
 vec3 KEY;
+float gCrisp;  // 1 where the label is drawn: it is antialiased already, so FXAA leaves it alone
 
 vec4 dec(vec4 g) {
 #ifdef ENC8
@@ -642,10 +666,12 @@ vec3 env(vec3 R) {
 
 // the label is a separate, flat layer of polished silver laid on top of the goo. It is shaded on its own,
 // never through the goo's normals, so the letters cannot warp; only their stamped edges catch the light
+float labelD(vec2 lu) { return textureLod(uLabel, lu, 0.0).r; }      // label texels, positive inside
+float labelStamp(vec2 lu) { return smoothstep(-6.0, 6.0, labelD(lu)); } // rounded stamp profile, ~1px each side
 vec3 shadeLabel(vec2 lu, float sh, float ao) {
   vec2 tx = vec2(2.5 / 1024.0, 2.5 / 256.0);
-  float mx = textureLod(uLabel, lu + vec2(tx.x, 0.0), uLabelLod).a - textureLod(uLabel, lu - vec2(tx.x, 0.0), uLabelLod).a;
-  float my = textureLod(uLabel, lu + vec2(0.0, tx.y), uLabelLod).a - textureLod(uLabel, lu - vec2(0.0, tx.y), uLabelLod).a;
+  float mx = labelStamp(lu + vec2(tx.x, 0.0)) - labelStamp(lu - vec2(tx.x, 0.0));
+  float my = labelStamp(lu + vec2(0.0, tx.y)) - labelStamp(lu - vec2(0.0, tx.y));
   vec3 N = normalize(vec3(-mx * 1.1, -my * 1.1, 1.0));
   vec3 R = reflect(vec3(0.0, 0.0, -1.0), N);
   vec3 silver = vec3(0.9, 0.91, 0.94);
@@ -744,7 +770,9 @@ vec3 shadeGoo(vec2 p, vec4 g) {
   if (uLabelAmt > 0.0) {
     vec2 lu = (p - uLabelBox.xy) / (2.0 * uLabelBox.zw) + 0.5;
     if (lu.x > 0.0 && lu.y > 0.0 && lu.x < 1.0 && lu.y < 1.0) {
-      float m = textureLod(uLabel, lu, uLabelLod).a * (1.0 - smoothstep(0.15, 0.5, strandness)) * uLabelAmt;
+      float d = labelD(lu) * uLabelPx, onFace = 1.0 - smoothstep(0.15, 0.5, strandness);
+      float m = clamp(d + 0.5, 0.0, 1.0) * onFace * uLabelAmt;
+      if (d > -2.0 && onFace > 0.5) gCrisp = 1.0;
       if (m > 0.002) col = mix(col, shadeLabel(lu, sh, ao), m);
     }
   }
@@ -807,6 +835,7 @@ vec3 aces(vec3 x) { return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59
 
 void main() {
   KEY = normalize(vec3(-0.45, -0.56, 0.74));
+  gCrisp = 0.0;
   ivec2 c = ivec2(gl_FragCoord.xy);
   vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) / uDpr;
   vec4 g = gAt(c);
@@ -825,7 +854,7 @@ void main() {
   }
   col = pow(aces(col * 0.95), vec3(1.0 / 2.2));
   col += (hash12(gl_FragCoord.xy + fract(uTime) * 61.0) - 0.5) / 255.0;
-  outC = vec4(col, 1.0);
+  outC = vec4(col, 1.0 - gCrisp);
 }`;
 
 function compile(type, src) {
@@ -850,7 +879,7 @@ function program(fs, names) {
   return { prog, u };
 }
 const p1 = program(FRAG_SCENE, ['uArrowSDF', 'uMorph', 'uCoat', 'uNC', 'uCoil', 'uCBox', 'uHandSDF', 'uHand', 'uHand2', 'uRes', 'uDpr', 'uTime', 'uBtn', 'uBtnZ', 'uBtnZ2', 'uPull', 'uPeak', 'uNS', 'uPts', 'uBox', 'uAnc', 'uAncD', 'uNBr', 'uBr', 'uNB', 'uBlob', 'uBlobZ', 'uRip', 'uLabel', 'uLabelBox', 'uEmboss', 'uZTop', 'uK']);
-const p2 = program(FRAG_SHADE, ['uG', 'uLabel', 'uRes', 'uDpr', 'uTime', 'uLabelBox', 'uLabelAmt', 'uLabelLod', 'uIri', 'uZMax', 'uLift', 'uBtnP', 'uWin', 'uBtnH', 'uHandCol', 'uArrowCol', 'uMorph', 'uHand', 'uHand2']);
+const p2 = program(FRAG_SHADE, ['uG', 'uLabel', 'uRes', 'uDpr', 'uTime', 'uLabelBox', 'uLabelAmt', 'uLabelPx', 'uIri', 'uZMax', 'uLift', 'uBtnP', 'uWin', 'uBtnH', 'uHandCol', 'uArrowCol', 'uMorph', 'uHand', 'uHand2']);
 
 // ── icon textures (arrow + hand): colour (for shading) + signed distance field (for the 3D slab)
 const handColTex = gl.createTexture(), handSdfTex = gl.createTexture();
@@ -920,7 +949,9 @@ out vec4 outC;
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 void main() {
   vec2 px = 1.0 / uRes, uv = gl_FragCoord.xy * px;
-  vec3 cM = texture(uC, uv).rgb;
+  vec4 c0 = texture(uC, uv);
+  vec3 cM = c0.rgb;
+  if (c0.a < 0.5) { outC = vec4(cM, 1.0); return; } // label letters: smoothing would only smear them
   float lNW = luma(texture(uC, uv + vec2(-1.0, -1.0) * px).rgb), lNE = luma(texture(uC, uv + vec2(1.0, -1.0) * px).rgb);
   float lSW = luma(texture(uC, uv + vec2(-1.0, 1.0) * px).rgb), lSE = luma(texture(uC, uv + vec2(1.0, 1.0) * px).rgb);
   float lM = luma(cM);
@@ -965,7 +996,7 @@ function makeGBuffer() {
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
-// ───────────────────────────── label (SVG → mask texture) ─────────────────────────────
+// ───────────────────────────── label (SVG → distance field texture) ─────────────────────────────
 const LABEL_W = 1024, LABEL_H = 256;
 const labelCanvas = document.createElement('canvas');
 labelCanvas.width = LABEL_W; labelCanvas.height = LABEL_H;
@@ -974,12 +1005,46 @@ const labelTex = gl.createTexture();
 gl.bindTexture(gl.TEXTURE_2D, labelTex);
 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
 
+// 1D squared distance transform (Felzenszwalb & Huttenlocher) along one row or column, in place
+function edt1d(grid, offset, stride, length, f, v, z) {
+  v[0] = 0; z[0] = -1e20; z[1] = 1e20; f[0] = grid[offset];
+  for (let q = 1, k = 0, s = 0; q < length; q++) {
+    f[q] = grid[offset + q * stride];
+    const q2 = q * q;
+    do { const r = v[k]; s = (f[q] - f[r] + q2 - r * r) / (q - r) / 2; } while (s <= z[k] && --k > -1);
+    k++; v[k] = q; z[k] = s; z[k + 1] = 1e20;
+  }
+  for (let q = 0, k = 0; q < length; q++) {
+    while (z[k + 1] < q) k++;
+    const r = v[k], qr = q - r;
+    grid[offset + q * stride] = f[r] + qr * qr;
+  }
+}
+function edt(grid, w, h) {
+  const n = Math.max(w, h), f = new Float64Array(n), v = new Uint16Array(n), z = new Float64Array(n + 1);
+  for (let x = 0; x < w; x++) edt1d(grid, x, w, h, f, v, z);
+  for (let y = 0; y < h; y++) edt1d(grid, y * w, 1, w, f, v, z);
+}
+// glyph coverage → signed distance in label texels (positive inside), with sub-texel edges from the
+// antialiased alpha, so the shader can draw letters with a crisp 1px edge at any size
+function labelSdf(rgba, w, h) {
+  const n = w * h, outer = new Float64Array(n), inner = new Float64Array(n), out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = rgba[i * 4 + 3] / 255;
+    if (a >= 1) { outer[i] = 0; inner[i] = 1e20; }
+    else if (a <= 0) { outer[i] = 1e20; inner[i] = 0; }
+    else { const d = 0.5 - a; outer[i] = d > 0 ? d * d : 0; inner[i] = d < 0 ? d * d : 0; }
+  }
+  edt(outer, w, h); edt(inner, w, h);
+  for (let i = 0; i < n; i++) out[i] = Math.sqrt(inner[i]) - Math.sqrt(outer[i]);
+  return out;
+}
+
 function uploadLabel() {
+  const sdf = labelSdf(lctx.getImageData(0, 0, LABEL_W, LABEL_H).data, LABEL_W, LABEL_H);
   gl.bindTexture(gl.TEXTURE_2D, labelTex);
-  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, labelCanvas);
-  gl.generateMipmap(gl.TEXTURE_2D);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, LABEL_W, LABEL_H, 0, gl.RED, gl.FLOAT, sdf);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -1560,6 +1625,30 @@ const coilBuf = new Float32Array(MAXC * WP * 4), cboxBuf = new Float32Array(MAXC
 const blobBuf = new Float32Array(MAXB * 4), blobZBuf = new Float32Array(MAXB), ripBuf = new Float32Array(MAXR * 4);
 const K = [2.5, 6, 5]; // tight joins: stringy and elastic, not a fluid that pools
 
+// Passes 1 and 2 only run inside the region that can show more than bare floor; outside it the shaded
+// floor from earlier frames is kept in cTex. Last frame's region is redrawn too, so nothing is left behind
+const SHADOW_PAD = 100;      // soft shadow, AO and floor "near" probes reach this far past the geometry (+ its height), px
+const BTN_SHADOW_PAD = 160;  // the button's analytic floor shadow has faded out by here, px
+let lastRegion = null;       // null: redraw the whole screen (first frame, after a resize)
+function activeRegion(g, ns, nc, nb, zTop) {
+  const r = [g.cx - g.hw - BTN_SHADOW_PAD, g.cy - g.hh - BTN_SHADOW_PAD, g.cx + g.hw + BTN_SHADOW_PAD, g.cy + g.hh + BTN_SHADOW_PAD];
+  const pad = SHADOW_PAD + zTop;
+  const add = (x0, y0, x1, y1) => {
+    r[0] = Math.min(r[0], x0 - pad); r[1] = Math.min(r[1], y0 - pad);
+    r[2] = Math.max(r[2], x1 + pad); r[3] = Math.max(r[3], y1 + pad);
+  };
+  for (let i = 0; i < ns; i++) add(boxBuf[i * 4], boxBuf[i * 4 + 1], boxBuf[i * 4 + 2], boxBuf[i * 4 + 3]);
+  for (let i = 0; i < nc; i++) add(cboxBuf[i * 4], cboxBuf[i * 4 + 1], cboxBuf[i * 4 + 2], cboxBuf[i * 4 + 3]);
+  for (let i = 0; i < nb; i++) { const [x, y, , rad] = blobBuf.subarray(i * 4, i * 4 + 4); add(x - rad, y - rad, x + rad, y + rad); }
+  if (hand.on) { const hr = 28 * hand.s + 4, hx = cur.x + hand.ox, hy = cur.y + hand.oy; add(hx - hr, hy - hr, hx + hr, hy + hr); }
+  const u = lastRegion ? [Math.min(r[0], lastRegion[0]), Math.min(r[1], lastRegion[1]), Math.max(r[2], lastRegion[2]), Math.max(r[3], lastRegion[3])]
+    : [0, 0, viewW(), viewH()];
+  lastRegion = r;
+  const x0 = clamp(Math.floor(u[0] * DPR), 0, W), x1 = clamp(Math.ceil(u[2] * DPR), 0, W);
+  const y0 = clamp(Math.floor(H - u[3] * DPR), 0, H), y1 = clamp(Math.ceil(H - u[1] * DPR), 0, H);
+  return [x0, y0, x1 - x0, y1 - y0];
+}
+
 function render() {
   const g = geo();
   let zTop = g.top + btn.dome + pull.amt + peak.amt * PEAK_H * P.pull + btn.lift * LIFT_H + 4;
@@ -1667,10 +1756,16 @@ function render() {
 
   const lb = [g.cx, g.cy + LABEL_NUDGE, btn.lbw, btn.lbh];
   const time2 = reduced ? 3 : time;
+  const region = activeRegion(g, ns, nc, nb, zTop);
 
   // pass 1
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.viewport(0, 0, W, H);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.clearColor(4, 0, 0, 0); // bare floor everywhere else: no hit, 4px from any surface
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.SCISSOR_TEST);
+  gl.scissor(region[0], region[1], region[2], region[3]);
   gl.useProgram(p1.prog);
   gl.bindVertexArray(vao);
   const u1 = p1.u;
@@ -1727,7 +1822,7 @@ function render() {
   gl.uniform1f(u2.uTime, time2);
   gl.uniform4f(u2.uLabelBox, lb[0], lb[1], lb[2], lb[3]);
   gl.uniform1f(u2.uLabelAmt, labelAmt);
-  gl.uniform1f(u2.uLabelLod, Math.max(0, Math.log2(LABEL_W / (2 * lb[2] * DPR)) - 0.6)); // crisp letters
+  gl.uniform1f(u2.uLabelPx, (2 * lb[2] * DPR) / LABEL_W);
   gl.uniform1f(u2.uIri, P.sheen);
   gl.uniform1f(u2.uZMax, zTop);
   gl.uniform1f(u2.uLift, btn.lift);
@@ -1745,6 +1840,7 @@ function render() {
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
   // pass 3: FXAA to the screen
+  gl.disable(gl.SCISSOR_TEST);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.useProgram(p3.prog);
   gl.uniform1i(p3.u.uC, 4);
@@ -1776,6 +1872,7 @@ function resize() {
   canvas.width = W; canvas.height = H;
   DPR = W / viewW(); // device pixels per virtual px: the scale-up happens here
   makeGBuffer();
+  lastRegion = null;
 }
 addEventListener('resize', resize);
 resize();
